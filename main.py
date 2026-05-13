@@ -1,5 +1,12 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
+import shutil
+import os
+# Forzamos a que el sistema reconozca la arquitectura RDNA2 de la RX 6600
+os.environ["HSA_OVERRIDE_GFX_VERSION"] = "10.3.0"
+
+# Opcional: Forzar a Ollama a usar la GPU si hay múltiples dispositivos
+os.environ["OLLAMA_GPU_OVERHEAD"] = "1"
 import ollama
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -7,12 +14,16 @@ from concurrent.futures import ThreadPoolExecutor
 from database import init_db, registrar_log
 from subtemas import SUBTEMAS_VALIDOS
 from models import ChatRequest, ChatResponse
+from external_api import buscar_en_openstax
 
 app = FastAPI(title="Chatbot Pedagógico UNRaf")
 # Inicializamos la DB al arrancar
 @app.on_event("startup")
 def startup_event():
     init_db()
+
+# Creamos una carpeta para los videos si no existe
+os.makedirs("uploads", exist_ok=True)
 
 class ChatRequest(BaseModel):
     user_id: str
@@ -48,23 +59,31 @@ executor = ThreadPoolExecutor(max_workers=3)
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
     loop = asyncio.get_event_loop()
-    
-    # 1. Clasificación asíncrona
-    # Usamos args en run_in_executor para pasar parámetros de forma limpia
+    print("1. Petición recibida...")
+    print(f"2. Buscando tema: {request.pregunta}")
+    # 1. Clasificar el tema para saber qué buscar en OpenStax
     tema_detectado = await loop.run_in_executor(executor, clasificar_pregunta, request.pregunta)
     
-    # 2. Validación de seguridad
-    if "FUERA_DE_ESTRUCTURA" in tema_detectado:
-        return {"respuesta": "No puedo responder a esto basándome en el material proporcionado."}
+    print("3. Consultando OpenStax...")
+    # 2. Obtener contexto de OpenStax basado en el tema o la pregunta
+    # Ejecutamos la API en el executor para no bloquear el servidor
+    contexto_web = await loop.run_in_executor(executor, buscar_en_openstax, tema_detectado)
 
-    # 3. Preparación del Prompt
+    # 3. Preparar el Prompt para Phi-3 con la info de la página
     system_content = generar_system_prompt(request.confidence)
-    contexto_prueba = "Material de cátedra: La derivada de una constante es cero..."
-    full_prompt = f"CONTEXTO:\n{contexto_prueba}\n\nPREGUNTA: {request.pregunta}"
-
-    # 4. Ejecución de la IA
+    full_prompt = f"""
+    CONTEXTO ACADÉMICO (OpenStax):
+    {contexto_web}
+    
+    PREGUNTA DEL ESTUDIANTE:
+    {request.pregunta}
+    
+    Instrucción: Responde como un profesor usando el contexto académico proveído. 
+    Si la información no es suficiente, usa tu conocimiento base pero prioriza el contexto.
+    """
+    print("4. Llamando a Ollama")
+    # 4. Respuesta de la IA
     try:
-        # Definimos una función interna para la llamada a Ollama
         def call_ollama():
             return ollama.chat(
                 model='phi3',
@@ -78,18 +97,13 @@ async def chat_endpoint(request: ChatRequest):
         response = await loop.run_in_executor(executor, call_ollama)
         respuesta_final = response['message']['content']
         
-        # 5. Registro en DB usando tu archivo database.py
-        # No hace falta await aquí si no es una función asíncrona, 
-        # pero lo mandamos al executor para no bloquear el retorno al usuario
+        # 5. Registro en DB (para auditoría de la UNRaf)
         loop.run_in_executor(executor, registrar_log, request, tema_detectado, respuesta_final)
         
-        return ChatResponse(
-            tema = tema_detectado,
-            respuesta = respuesta_final
-        )
+        return ChatResponse(tema=tema_detectado, respuesta=respuesta_final)
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error en el motor de IA: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 def clasificar_pregunta(pregunta):
     prompt = f"Clasifica: {pregunta} en {SUBTEMAS_VALIDOS} o FUERA_DE_ESTRUCTURA. Solo el nombre."
