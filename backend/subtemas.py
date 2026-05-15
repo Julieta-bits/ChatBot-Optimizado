@@ -33,4 +33,16 @@ SUBTEMAS_VALIDOS = {
     "gradiente",
     "puntos_criticos_multivariable",
     "extremos_multivariables"
+    # Sucesiones e Integración avanzada
+    "integracion_por_partes",
+    "sustitucion_trigonometrica",
+    "fracciones_parciales",
+    "integrales_impropias",
+    "sucesiones_infinitas",
+    "series_infinitas",
+    "convergencia_y_divergencia",
+    "criterio_de_la_integral",
+    "criterio_del_cociente_y_raiz",
+    "series_de_potencias",
+    "series_de_taylor_y_maclaurin"
 }
